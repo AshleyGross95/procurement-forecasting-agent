@@ -8,6 +8,19 @@
 - Prioritization by financial impact rather than by date or department, so a reviewer's limited time goes to the exceptions that matter most.
 - A clear human-in-the-loop checkpoint (acknowledge/escalate) that keeps an AI-assisted review process auditable rather than autonomous.
 
+## What this demo is / What this demo is not
+
+**Is:**
+- A deterministic rule engine that runs six exception checks over synthetic procurement data and prioritizes the results by financial exposure.
+- A working Streamlit review UI with a real human-in-the-loop acknowledge/escalate step, backed by actual rule output.
+- An optional live narration call to Claude that only rewrites the explanation text -- detection and dollar amounts are unaffected.
+
+**Is not:**
+- Real authentication or authorization -- there are no user accounts, roles, or access control of any kind.
+- A live integration with any real ERP, AP, or payment system -- the only optional live call is the Claude narration described above.
+- A hosted deployment -- there is no hosted demo; run it locally with the Quickstart commands below.
+- Real data -- every PO, supplier, budget, and invoice in `data/synthetic/` is fictional.
+
 ## Demo moment
 
 A reviewer opens the dashboard and immediately sees, at the top of the prioritized table, **PO-3010 -- a $62,000 purchase order flagged for two reasons at once**: it exceeds the $50,000 policy threshold requiring extra approval, and its invoice was submitted twice (two invoices, same PO, same amount, same hash) for a duplicate-payment exposure of $62,000. The detail panel explains both findings in plain language and recommends holding the duplicate for AP confirmation before any payment goes out. The reviewer clicks **Escalate**, and that decision is recorded for the session.
@@ -68,6 +81,8 @@ streamlit run app.py
 
 Runs in mock mode by default with zero API keys required -- all detection, exposure math, and recommended actions come from the deterministic rule engine in `src/engine.py` over the synthetic CSVs in `data/synthetic/`.
 
+No hosted demo for this prototype -- run locally with the Quickstart commands above.
+
 ## Switching to live mode
 
 Copy `.env.example` to `.env`, then set:
@@ -96,6 +111,26 @@ Run the test suite with:
 ```bash
 pytest
 ```
+
+## Integration status
+
+| Integration | Status | Notes |
+|---|---|---|
+| LLM narration (Claude, `src/llm.py`) | `mock` by default / `real` when `MOCK_MODE=false` + a valid `ANTHROPIC_API_KEY` | Only rewrites the explanation text for an already-detected exception; never changes detection or financial exposure numbers. |
+| ERP / AP source data | `mock` | Synthetic CSVs in `data/synthetic/`; no live connection to any ERP or AP system exists or is built. |
+| Approval / workflow routing (Acknowledge / Escalate) | `mock` | Recorded in Streamlit session state only; not wired to any real approval, ticketing, or payment system. |
+| Payment system | none | This agent never releases or blocks a payment in any real system. |
+
+## Known limitations
+
+**Prototype limitations (intentionally out of scope for a demo):**
+- No real authentication or authorization -- anyone with the URL sees and can click everything.
+- No database -- state (review status) lives only in Streamlit's in-memory session state and resets when the session ends.
+- No hosted deployment -- runs locally only.
+- Static synthetic CSVs -- no scheduled refresh or connection to a live data source.
+- Acknowledge/Escalate decisions are not persisted or audited beyond the current session.
+
+**Defects found during this audit:** none found. All nine tests pass; the six rule types were verified end-to-end against the synthetic data and a hand-built clean fixture produced zero exceptions (see Evaluation below).
 
 ## Roadmap
 
