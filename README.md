@@ -1,6 +1,8 @@
 # Procurement Forecasting Agent
 
-**Maturity:** Streamlit Cloud deployment pending · Synthetic data · Explainable rules workflow
+**Maturity:** Live public demo · Synthetic data · Explainable rules workflow
+
+**Live demo:** https://procurement-forecasting-agent.streamlit.app/ (verified 2026-08-31 — confirmed real detection output: 26 exceptions / $500,900 total exposure across all 6 rule types, review-status tracking and Reset State visible)
 
 ## 1. Business problem
 
