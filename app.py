@@ -11,25 +11,36 @@ import os
 import pandas as pd
 import streamlit as st
 
-from src import engine, llm
+from src import engine, forecast, llm, review
 from src.models import Exception as ExceptionRecord
 
 st.set_page_config(page_title="Procurement Exception Review", layout="wide")
 
 MOCK_MODE = os.getenv("MOCK_MODE", "true").strip().lower() != "false"
 
+#: Literal count of implemented exception-detection rules -- one entry per
+#: rule_* function in src/engine.py (inactive_supplier, missing_documentation,
+#: budget_variance, duplicate_invoice, policy_threshold, upcoming_renewal).
+#: See docs/data-model.md and tests/test_engine.py::test_exactly_six_rule_functions.
+NUM_EXCEPTION_RULES = 6
+
+#: Exact count of automated tests verified passing via `pytest -v` at release
+#: time (see README section 12 / docs/evaluation-plan.md). Update this only
+#: after re-running pytest and confirming the new count.
+NUM_VERIFIED_TESTS = 53
+
 
 @st.cache_data
 def _load_and_detect():
     purchase_orders, suppliers, budgets, invoices = engine.load_data()
     exceptions = engine.detect_all(purchase_orders, suppliers, budgets, invoices)
-    return exceptions
+    return purchase_orders, suppliers, budgets, invoices, exceptions
 
 
 def _exceptions_to_frame(exceptions: list[ExceptionRecord]) -> pd.DataFrame:
     rows = []
     for exc in exceptions:
-        status = st.session_state["review_status"].get(exc.unique_id, "Open")
+        status = review.get_status(st.session_state["review_status"], exc.unique_id)
         rows.append(
             {
                 "PO ID": exc.po_id,
@@ -47,6 +58,10 @@ def _exceptions_to_frame(exceptions: list[ExceptionRecord]) -> pd.DataFrame:
 
 def main() -> None:
     st.title("Procurement Pre-Payment Exception Review")
+
+    # Required public-release disclosure -- always visible on the main screen.
+    st.markdown("**Public portfolio prototype · Synthetic data**")
+
     st.caption(
         "Reviews synthetic purchase orders, suppliers, budgets, and invoices to surface "
         "pre-payment exceptions, prioritized by financial impact, with a recommended action for each."
@@ -62,13 +77,33 @@ def main() -> None:
     if "review_status" not in st.session_state:
         st.session_state["review_status"] = {}
 
-    exceptions = _load_and_detect()
+    purchase_orders, suppliers, budgets, invoices, exceptions = _load_and_detect()
+
+    # ------------------------------------------------------------------
+    # Required 3-metric panel (scale of the demo, not a live claim)
+    # ------------------------------------------------------------------
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Synthetic Purchase Orders", len(purchase_orders))
+    metric_col2.metric("Exception Rules", NUM_EXCEPTION_RULES)
+    metric_col3.metric("Automated Tests (verified)", NUM_VERIFIED_TESTS)
+    st.caption(
+        f"{len(purchase_orders)} synthetic purchase orders · {NUM_EXCEPTION_RULES} exception rules · "
+        f"{NUM_VERIFIED_TESTS} workflow tests -- see docs/evaluation-plan.md for how each number is calculated."
+    )
+
+    reset_col, _ = st.columns([1, 5])
+    if reset_col.button("Reset State", help="Clear every reviewer decision for this session, back to pending."):
+        review.reset_all(st.session_state["review_status"])
+        st.rerun()
+
+    st.divider()
 
     if not exceptions:
         st.success("No pre-payment exceptions detected in the current dataset.")
         return
 
     by_id = {exc.unique_id: exc for exc in exceptions}
+    all_unique_ids = list(by_id.keys())
 
     # ------------------------------------------------------------------
     # Summary metrics row
@@ -78,14 +113,37 @@ def main() -> None:
     col1.metric("Total Exceptions", len(exceptions))
     col2.metric("Total Financial Exposure", f"${total_exposure:,.0f}")
 
-    counts_by_type = pd.Series([e.exception_type for e in exceptions]).value_counts()
+    counts_by_type = forecast.build_exception_counts_by_type(exceptions)
     with col3:
         st.write("**Count by exception type**")
-        st.dataframe(
-            counts_by_type.rename_axis("exception_type").reset_index(name="count"),
-            hide_index=True,
-            use_container_width=True,
-        )
+        st.dataframe(counts_by_type, hide_index=True, use_container_width=True)
+
+    status_counts = review.summarize(st.session_state["review_status"], all_unique_ids)
+    st.write(
+        f"**Review status:** {status_counts[review.PENDING]} pending · "
+        f"{status_counts[review.APPROVED]} approved · "
+        f"{status_counts[review.HELD]} held · "
+        f"{status_counts[review.ESCALATED]} escalated"
+    )
+
+    st.divider()
+
+    # ------------------------------------------------------------------
+    # Illustrative forecast visualization
+    # ------------------------------------------------------------------
+    st.subheader("Illustrative forecast: exposure over time")
+    st.caption("Illustrative / synthetic demo data -- not a predictive model. "
+               "Cumulative financial exposure grouped by each PO's order month, "
+               "built from the same rule output above (src/forecast.py).")
+
+    monthly_forecast = forecast.build_monthly_exposure_forecast(exceptions, purchase_orders)
+    if not monthly_forecast.empty:
+        chart_frame = monthly_forecast.set_index("month")[["cumulative_exposure"]]
+        chart_frame = chart_frame.rename(columns={"cumulative_exposure": "Cumulative Exposure ($)"})
+        st.line_chart(chart_frame)
+        st.dataframe(monthly_forecast, hide_index=True, use_container_width=True)
+    else:
+        st.write("No exceptions to forecast.")
 
     st.divider()
 
@@ -116,7 +174,7 @@ def main() -> None:
     st.divider()
 
     # ------------------------------------------------------------------
-    # Detail view + acknowledge/escalate (human-in-the-loop action)
+    # Detail view + human review actions (approve / hold / escalate)
     # ------------------------------------------------------------------
     st.subheader("Review an exception")
 
@@ -143,23 +201,28 @@ def main() -> None:
         st.write(llm.generate_explanation(selected_exception))
 
     with action_col:
-        current_status = st.session_state["review_status"].get(selected_uid, "Open")
+        current_status = review.get_status(st.session_state["review_status"], selected_uid)
         st.write(f"Current status: **{current_status}**")
 
         # This is the human-in-the-loop control point: an AP reviewer must
-        # explicitly acknowledge or escalate every exception before payment
+        # explicitly approve, hold, or escalate every exception before payment
         # proceeds. This demo records that decision in session state only --
-        # no payment system or workflow tool is actually called.
-        if st.button("Acknowledge", use_container_width=True):
-            st.session_state["review_status"][selected_uid] = "Acknowledged"
+        # no payment system or workflow tool is actually called. Any
+        # exception with no recorded decision is implicitly "pending".
+        if st.button("Approve", use_container_width=True):
+            review.apply_action(st.session_state["review_status"], selected_uid, review.APPROVED)
+            st.rerun()
+        if st.button("Hold", use_container_width=True):
+            review.apply_action(st.session_state["review_status"], selected_uid, review.HELD)
             st.rerun()
         if st.button("Escalate", use_container_width=True):
-            st.session_state["review_status"][selected_uid] = "Escalated"
+            review.apply_action(st.session_state["review_status"], selected_uid, review.ESCALATED)
             st.rerun()
 
     st.caption(
-        "Acknowledge/Escalate marks this exception's review status for this session only, "
-        "standing in for a human approval workflow. It does not release or block payment in any real system."
+        "Approve/Hold/Escalate marks this exception's review status for this session only, "
+        "standing in for a human approval workflow. It does not release or block payment in any real system. "
+        "Use \"Reset State\" above to clear every decision back to pending."
     )
 
 
